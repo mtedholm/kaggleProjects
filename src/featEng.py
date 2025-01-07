@@ -1,44 +1,26 @@
+import os
 import pandas as pd
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-import ephem
-import holidays
-import math
-import os
-import psutil
-import pytz
-import random
-import re
-import requests
-import time
+import wbdata
+from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
-
-
-
-from collections import defaultdict
-
+import holidays
+import ephem
 import pytz
-from datetime import datetime
-
-import warnings
+import datetime
+from sklearn import preprocessing
 
 tqdm.pandas()
-# Suppress FutureWarning
-warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# This is a preprocessing script to add features, etc to the dataset
+# Constants
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 TEST_PATH = os.path.join(BASE_DIR, '../data/test.csv')
-TRAIN_PATH = os.path.join(BASE_DIR,'../data/train.csv')
-SUBMISSION_PATH = os.path.join(BASE_DIR,'../data/sample_submission.csv')
+TRAIN_PATH = os.path.join(BASE_DIR, '../data/train.csv')
+SUBMISSION_PATH = os.path.join(BASE_DIR, '../data/sample_submission.csv')
+OUTPUT_DIR = os.path.join(BASE_DIR, '../output')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# mappings
-
-# tz for moon phase
+# Mappings
 TIMEZONES = {
     'Canada': 'America/Toronto',
     'Finland': 'Europe/Helsinki',
@@ -48,7 +30,6 @@ TIMEZONES = {
     'Kenya': 'Africa/Nairobi'
 }
 
-# Country-Continent Mapping
 CONTINENTS = {
     "Canada": "North America",
     "Italy": "Europe",
@@ -58,151 +39,194 @@ CONTINENTS = {
     "Singapore": "Asia",
 }
 
-
+# Functions
 def load_data():
-  """Load train and test datasets."""
-  train = pd.read_csv(TRAIN_PATH)
-  test = pd.read_csv(TEST_PATH)
-  return train, test
+    """Load train and test datasets."""
+    train = pd.read_csv(TRAIN_PATH)
+    test = pd.read_csv(TEST_PATH)
+    return train, test
 
 def preprocess_date(df):
-    """Preprocess date column and extract features."""
+    """Preprocess the date column and extract date-based features."""
+    tqdm.pandas(desc="Adding time-based features")
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df['Year'] = df['date'].dt.year
     df['Month'] = df['date'].dt.month
     df['Weekday'] = df['date'].dt.dayofweek
     df['Quarter'] = df['date'].dt.quarter
+    df['Continent'] = df['country'].map(CONTINENTS)
+    df['is_weekend'] = df['Weekday'].isin([5, 6]).astype(int)
+    df['day_of_year'] = df['date'].dt.dayofyear
+    df['sin_day'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
+    df['cos_day'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
+
+    # Add lag and rolling average only if `num_sold` exists (train dataset)
+    # impute an effectively 0 value for NaN
+    if 'num_sold' in df.columns:
+        df['num_sold'] = df['num_sold'].fillna(0.00000001)
+        df['lag_1'] = df['num_sold'].shift(1)
+        df['rolling_avg_7'] = df['num_sold'].rolling(7).mean()
+        print(f"Lag and rolling averages added:\n{df[['lag_1', 'rolling_avg_7']].head()}")
+    else:
+        print("Skipping lag and rolling average as 'num_sold' is not in columns.")
+
     return df
 
-
+# now redundant since i refactored preprocess_data to just do everything
 def add_continent(df):
-  """Add continent based on country."""
-  df['Continent'] = df['country'].map(CONTINENTS)
-  return df
+    """Add continent information."""
+    df['Continent'] = df['country'].map(CONTINENTS)
+    return df
 
+# now redundant since i refactored preprocess_data to just do everything
 def add_is_weekend(df):
-    """Add a feature indicating if the date is a weekend."""
+    """Add weekend indicator."""
     df['is_weekend'] = df['Weekday'].isin([5, 6]).astype(int)
     return df
 
-def impute_num_sold(df):
-  """Impute 'num_sold' column for NaN values."""
-  if 'num_sold' in df.columns:
-    df['num_sold'].fillna(0.00000000001, inplace=True)
-  return df
+# now redundant since i refactored preprocess_data to just do everything
+def add_features(df):
+    """Add lag, rolling averages, and sinusoidal encodings."""
+    tqdm.pandas(desc="Adding time-based features")
+    df['day_of_year'] = df['date'].dt.dayofyear
+    df['sin_day'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
+    df['cos_day'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
 
-def add_is_holiday(df):
-    """Add a feature indicating if the date is a holiday."""
+    # Add lag and rolling average only if `num_sold` exists (train dataset)
+    if 'num_sold' in df.columns:
+        df['num_sold'] = df['num_sold'].fillna(0.000001)
+        df['lag_1'] = df['num_sold'].shift(1)
+        df['rolling_avg_7'] = df['num_sold'].rolling(7).mean()
+        print(f"Lag and rolling averages added:\n{df[['lag_1', 'rolling_avg_7']].head()}")
+    else:
+        print("Skipping lag and rolling average as 'num_sold' is not in columns.")
 
-    def is_holiday(row):
-      try:
-        hols = holidays.country_holidays(row['country'], years=row['Year'])
-        return 1 if row['date'] in hols else 0
-      except KeyError:
-        return 0
-
-    df['is_holiday'] = df.progress_apply(is_holiday, axis=1)
     return df
 
 
-def add_days_to_holiday(df):
-  """Add days to next and previous holidays."""
-  min_year = df['date'].dt.year.min()
-  max_year = df['date'].dt.year.max()
-  years = list(range(min_year - 1, max_year + 1))
 
-  holiday_objects = {
-    'Canada': holidays.country_holidays('CA', years=years),
-    'Finland': holidays.country_holidays('FI', years=years),
-    'Italy': holidays.country_holidays('IT', years=years),
-    'Norway': holidays.country_holidays('NO', years=years),
-    'Singapore': holidays.country_holidays('SG', years=years),
-    'Kenya': holidays.country_holidays('KE', years=years)
-  }
-
-  def days_to_holiday(row):
-    country = row['country']
-    date_obj = row['date'].date()
-    holidays_for_country = holiday_objects.get(country, [])
-
-    if not holidays_for_country:
-      return None, None
-
-    next_holidays = [holiday for holiday in holidays_for_country if holiday >= date_obj]
-    prev_holidays = [holiday for holiday in holidays_for_country if holiday <= date_obj]
-
-    days_to_next = (min(next_holidays) - date_obj).days if next_holidays else float('inf')
-    days_from_prev = (date_obj - max(prev_holidays)).days if prev_holidays else float('inf')
-
-    return days_to_next, days_from_prev
-
-  df[['days_to_next_holiday', 'days_from_prev_holiday']] = df.progress_apply(
-    lambda row: pd.Series(days_to_holiday(row)), axis=1
-  )
-  return df
+def encode_categorical(df):
+    """
+    Encode all object-type columns in the DataFrame using LabelEncoder.
+    """
+    tqdm.pandas(desc="Encoding categorical values")
+    label_encoder = preprocessing.LabelEncoder()
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = label_encoder.fit_transform(df[col].astype(str))
+    return df
 
 
+# Still a WIP:
+# TODO: refactor to just use worldbank API instead of the python wrapper
+def fetch_gdp_data(countries, years):
+    """Fetch GDP data for the specified countries and years."""
+    tqdm.pandas(desc="Retrieving GDP data")
+
+    country_code_map = {
+        'Canada': 'CAN',
+        'Finland': 'FIN',
+        'Italy': 'ITA',
+        'Norway': 'NOR',
+        'Singapore': 'SGP',
+        'Kenya': 'KEN'
+    }
+    # Just some starter indicators that could potentially be slightly relevant
+    indicators = {
+        'Poverty_Headcount_Vul4to10': '1.2.HCount.Vul4to10',
+        'GDP_Per_Capita': 'NY.GDP.PCAP.CD',
+        'Life_Expectancy': 'SP.DYN.LE00.IN'
+    }
+
+    gdp_data = None  # Initialize this to handle errors gracefully
+
+    try:
+        # Fetch data for all years
+        gdp_data = wbdata.get_dataframe(
+            indicators=indicators,
+            country=['CAN', 'FIN', 'ITA', 'NOR', 'SGP', 'KEN']
+        )
+
+        # Reset the index to make 'date' and 'country' columns
+        gdp_data = gdp_data.reset_index()
+
+        # Filter for the desired years (2013–2017)
+        gdp_data['date'] = pd.to_datetime(gdp_data['date'])
+        gdp_data = gdp_data[(gdp_data['date'] >= '2013-01-01') & (gdp_data['date'] <= '2017-12-31')]
+
+        # Rename columns for clarity
+        gdp_data = gdp_data.rename(columns={
+            'date': 'Year',
+            'Poverty_Headcount_Vul4to10': 'Poverty_Vulnerable',
+            'GDP_Per_Capita': 'GDP_Per_Capita',
+            'Life_Expectancy': 'Life_Expectancy'
+        })
+        gdp_data['Year'] = gdp_data['Year'].dt.year
+
+        #print(gdp_data.head())
+
+    except Exception as e:
+        print(f"Error fetching indicators: {e}")
+
+    return gdp_data
+
+# adds the GDP data to the original df
+def add_gdp(df, gdp_data):
+    """Merge GDP data into the dataframe based on country and Year."""
+    tqdm.pandas(desc="Merging GDP data")
+    df = pd.merge(df, gdp_data, on=['country', 'Year'], how='left')
+    return df
+
+# just for fun, why not. Maybe people buy more holographic Kaggle stickers during full moons.
 def add_moon_phase(df):
-  """Add moon phase and category features."""
+    """Add moon phase and category features."""
+    def moon_phase(date):
+        moon = ephem.Moon(date)
+        return moon.phase
 
-  def moon_phase(date):
-    moon = ephem.Moon(date)
-    return moon.phase
+    # TODO: refactor this fxn out since it all gets label encoded anyway
 
-  def moon_phase_category(phase):
-    if 0 <= phase < 10 or 90 <= phase <= 100:
-      return 'New Moon'
-    elif 10 <= phase < 40:
-      return 'Waxing Crescent'
-    elif 40 <= phase < 60:
-      return 'First Quarter'
-    elif 60 <= phase < 90:
-      return 'Waxing Gibbous'
-    else:
-      return 'Full Moon'
+    def moon_phase_category(phase):
+        if 0 <= phase < 10 or 90 <= phase <= 100:
+            return 'New Moon'
+        elif 10 <= phase < 40:
+            return 'Waxing Crescent'
+        elif 40 <= phase < 60:
+            return 'First Quarter'
+        elif 60 <= phase < 90:
+            return 'Waxing Gibbous'
+        else:
+            return 'Full Moon'
 
-  def local_moon_phase(row):
-    timezone = pytz.timezone(TIMEZONES.get(row['country'], 'UTC'))
-    local_date = row['date'].tz_localize('UTC').tz_convert(timezone)
-    return moon_phase(local_date)
+    # biggest accomplishment today: adding emoji to the TQDM bar
+    tqdm.pandas(desc="Calculating moon phases 🌕🌖🌗🌘🌑🌒")
+    df['moon_phase'] = df['date'].progress_apply(moon_phase)
+    df['moon_phase_category'] = df['moon_phase'].progress_apply(moon_phase_category)
+    return df
 
-  df['moon_phase'] = df['date'].progress_apply(moon_phase)
-  df['moon_phase_category'] = df['moon_phase'].progress_apply(moon_phase_category)
-  df['local_moon_phase'] = df.progress_apply(local_moon_phase, axis=1)
-  return df
+def save_data(train, test):
+    """Save processed train and test datasets."""
+    train.to_csv(os.path.join(OUTPUT_DIR, 'train_final_processed.csv'), index=False)
+    test.to_csv(os.path.join(OUTPUT_DIR, 'test_final_processed.csv'), index=False)
 
+# Main Pipeline
 def main():
-    """Main function to preprocess data."""
-    output_dir = os.path.join(BASE_DIR, '../data')
-    os.makedirs(output_dir, exist_ok=True)
-
     train, test = load_data()
+    # Preprocessing
     train = preprocess_date(train)
     test = preprocess_date(test)
-
-    train = add_continent(train)
-    test = add_continent(test)
-
-    train = add_is_weekend(train)
-    test = add_is_weekend(test)
-
-    train = impute_num_sold(train)
-
-    train = add_is_holiday(train)
-    test = add_is_holiday(test)
-
-    train = add_days_to_holiday(train)
-    test = add_days_to_holiday(test)
 
     train = add_moon_phase(train)
     test = add_moon_phase(test)
 
-    # Save processed data (optional)
-    train.to_csv(os.path.join(output_dir, 'train_processed.csv'), index=False)
-    test.to_csv(os.path.join(output_dir, 'test_processed.csv'), index=False)
+    # Encode categorical variables
 
-print("Preprocessing completed successfully.")
+    train = encode_categorical(train)
+    test = encode_categorical(test)
 
+    # Save processed data
+    save_data(train, test)
+    print("Success! Preprocessing and feature engineering completed.")
 
-if __name__ == "__main__":
-  main()
+if __name__ == '__main__':
+    main()
